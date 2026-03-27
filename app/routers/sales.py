@@ -34,12 +34,12 @@ def annual_summary(db: Session = Depends(get_db), _=AuthDep):
     )
     return [
         schemas.SummaryRow(
-            year          = r.year,
-            total_units   = r.total_units,
-            total_revenue = float(r.total_revenue),
-            avg_price_eur = round(float(r.avg_price_eur), 2),
-            avg_bev_share = round(float(r.avg_bev_share), 4),
-            avg_gdp_growth= round(float(r.avg_gdp_growth), 4),
+            year           = r.year,
+            total_units    = r.total_units,
+            total_revenue  = float(r.total_revenue),
+            avg_price_eur  = round(float(r.avg_price_eur), 2),
+            avg_bev_share  = round(float(r.avg_bev_share), 4),
+            avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
         )
         for r in rows
     ]
@@ -123,6 +123,7 @@ def by_model(
 
 @router.get("/by-year", response_model=list[schemas.SummaryRow])
 def by_year(
+    year:   int | None = Query(None, description="Filter by year"),
     region: str | None = Query(None, description="Filter by region"),
     model:  str | None = Query(None, description="Filter by model"),
     db: Session = Depends(get_db),
@@ -130,33 +131,63 @@ def by_year(
 ):
     """
     Annual totals with optional region/model filter.
-    Useful for drilling into a specific slice.
+    When a specific year is provided, returns that year's row.
+    When no year is provided, returns a single aggregated row across all years.
     """
-    q = db.query(
-        models.SalesFact.year,
-        func.sum(models.SalesFact.units_sold)                        .label("total_units"),
-        func.sum(models.SalesFact.revenue_eur)                       .label("total_revenue"),
-        func.avg(cast(models.SalesFact.avg_price_eur, Float))        .label("avg_price_eur"),
-        func.avg(cast(models.SalesFact.bev_share, Float))            .label("avg_bev_share"),
-        func.avg(cast(models.SalesFact.gdp_growth, Float))           .label("avg_gdp_growth"),
-    ).group_by(models.SalesFact.year)
+
+    # ── Specific year requested → return that year's row ──
+    if year:
+        q = db.query(
+            models.SalesFact.year,
+            func.sum(models.SalesFact.units_sold)                  .label("total_units"),
+            func.sum(models.SalesFact.revenue_eur)                 .label("total_revenue"),
+            func.avg(cast(models.SalesFact.avg_price_eur, Float))  .label("avg_price_eur"),
+            func.avg(cast(models.SalesFact.bev_share, Float))      .label("avg_bev_share"),
+            func.avg(cast(models.SalesFact.gdp_growth, Float))     .label("avg_gdp_growth"),
+        ).group_by(models.SalesFact.year).filter(models.SalesFact.year == year)
+
+        if region:
+            q = q.filter(models.SalesFact.region == region)
+        if model:
+            q = q.filter(models.SalesFact.model == model)
+
+        rows = q.order_by(models.SalesFact.year).all()
+        return [
+            schemas.SummaryRow(
+                year           = r.year,
+                total_units    = r.total_units,
+                total_revenue  = float(r.total_revenue),
+                avg_price_eur  = round(float(r.avg_price_eur), 2),
+                avg_bev_share  = round(float(r.avg_bev_share), 4),
+                avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
+            )
+            for r in rows
+        ]
+
+    # ── No year filter → return one aggregated "All Years" row ──
+    agg = db.query(
+        func.sum(models.SalesFact.units_sold)                  .label("total_units"),
+        func.sum(models.SalesFact.revenue_eur)                 .label("total_revenue"),
+        func.avg(cast(models.SalesFact.avg_price_eur, Float))  .label("avg_price_eur"),
+        func.avg(cast(models.SalesFact.bev_share, Float))      .label("avg_bev_share"),
+        func.avg(cast(models.SalesFact.gdp_growth, Float))     .label("avg_gdp_growth"),
+    )
 
     if region:
-        q = q.filter(models.SalesFact.region == region)
+        agg = agg.filter(models.SalesFact.region == region)
     if model:
-        q = q.filter(models.SalesFact.model == model)
+        agg = agg.filter(models.SalesFact.model == model)
 
-    rows = q.order_by(models.SalesFact.year).all()
+    r = agg.one()
     return [
         schemas.SummaryRow(
-            year          = r.year,
-            total_units   = r.total_units,
-            total_revenue = float(r.total_revenue),
-            avg_price_eur = round(float(r.avg_price_eur), 2),
-            avg_bev_share = round(float(r.avg_bev_share), 4),
-            avg_gdp_growth= round(float(r.avg_gdp_growth), 4),
+            year           = 0,  # sentinel value — 0 means "All Years"
+            total_units    = r.total_units,
+            total_revenue  = float(r.total_revenue),
+            avg_price_eur  = round(float(r.avg_price_eur), 2),
+            avg_bev_share  = round(float(r.avg_bev_share), 4),
+            avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
         )
-        for r in rows
     ]
 
 
@@ -187,12 +218,12 @@ def monthly_trend(
     rows = q.order_by(models.SalesFact.year, models.SalesFact.month).all()
     return [
         schemas.MonthlyTrendRow(
-            year          = r.year,
-            month         = r.month,
-            total_units   = r.total_units,
-            total_revenue = float(r.total_revenue),
-            avg_bev_share = round(float(r.avg_bev_share), 4),
-            avg_fuel_price= round(float(r.avg_fuel_price), 4),
+            year           = r.year,
+            month          = r.month,
+            total_units    = r.total_units,
+            total_revenue  = float(r.total_revenue),
+            avg_bev_share  = round(float(r.avg_bev_share), 4),
+            avg_fuel_price = round(float(r.avg_fuel_price), 4),
         )
         for r in rows
     ]
@@ -272,7 +303,7 @@ def filter_options(db: Session = Depends(get_db), _=AuthDep):
     Returns the distinct years, regions and models available.
     Frontend uses this to populate filter dropdowns.
     """
-    years   = [r[0] for r in db.query(models.SalesFact.year)  .distinct().order_by(models.SalesFact.year).all()]
-    regions = [r[0] for r in db.query(models.SalesFact.region).distinct().order_by(models.SalesFact.region).all()]
-    model_list = [r[0] for r in db.query(models.SalesFact.model).distinct().order_by(models.SalesFact.model).all()]
+    years      = [r[0] for r in db.query(models.SalesFact.year)  .distinct().order_by(models.SalesFact.year).all()]
+    regions    = [r[0] for r in db.query(models.SalesFact.region).distinct().order_by(models.SalesFact.region).all()]
+    model_list = [r[0] for r in db.query(models.SalesFact.model) .distinct().order_by(models.SalesFact.model).all()]
     return {"years": years, "regions": regions, "models": model_list}
