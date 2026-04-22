@@ -5,10 +5,52 @@ from sqlalchemy import func, cast, Float
 from app import models, schemas
 from app.deps import get_db, get_current_user
 
+import redis
+import json
+import random
+
 router = APIRouter(prefix="/sales", tags=["Sales"])
 
 # Every endpoint requires a valid JWT — no admin needed, any logged-in user can read.
 AuthDep = Depends(get_current_user)
+
+# Redis connection
+redis_client = redis.Redis(
+    host="localhost",
+    port=6379,
+    db=0,
+    decode_responses=True
+)
+
+CACHE_VERSION = "v1"
+
+def get_cached(key: str):
+    try:
+        data = redis_client.get(key)
+        if data:
+            return json.loads(data)
+    except Exception:
+        pass
+    return None
+
+
+def set_cached(key: str, value, ttl: int = 300):
+    try:
+        ttl = ttl + random.randint(0, 60)
+
+        # convert pydantic models → dict
+        if isinstance(value, list):
+            value = [
+                v.model_dump() if hasattr(v, "model_dump") else v
+                for v in value
+            ]
+        elif hasattr(value, "model_dump"):
+            value = value.model_dump()
+
+        redis_client.setex(key, ttl, json.dumps(value))
+
+    except Exception:
+        pass
 
 
 # ── 1. Annual summary ─────────────────────────────────────────────────────────
@@ -19,6 +61,11 @@ def annual_summary(db: Session = Depends(get_db), _=AuthDep):
     Total units, total revenue, avg price, avg BEV share and avg GDP growth
     grouped by year — powers the KPI cards and the annual bar chart.
     """
+    key = f"{CACHE_VERSION}:summary"
+
+    if cached := get_cached(key):
+        return cached
+
     rows = (
         db.query(
             models.SalesFact.year,
@@ -32,7 +79,8 @@ def annual_summary(db: Session = Depends(get_db), _=AuthDep):
         .order_by(models.SalesFact.year)
         .all()
     )
-    return [
+
+    result = [
         schemas.SummaryRow(
             year           = r.year,
             total_units    = r.total_units,
@@ -43,6 +91,10 @@ def annual_summary(db: Session = Depends(get_db), _=AuthDep):
         )
         for r in rows
     ]
+
+    set_cached(key, result, ttl=600)
+
+    return result
 
 
 # ── 2. By region × year ────────────────────────────────────────────────────────
@@ -95,6 +147,11 @@ def by_model(
     Units, revenue, avg price per model per year.
     Powers the model performance table.
     """
+    key = f"{CACHE_VERSION}:by-model:{year or 'all'}"
+
+    if cached := get_cached(key):
+        return cached
+
     q = db.query(
         models.SalesFact.model,
         models.SalesFact.year,
@@ -107,7 +164,8 @@ def by_model(
         q = q.filter(models.SalesFact.year == year)
 
     rows = q.order_by(models.SalesFact.year, models.SalesFact.model).all()
-    return [
+
+    result = [
         schemas.ModelRow(
             model         = r.model,
             year          = r.year,
@@ -117,6 +175,10 @@ def by_model(
         )
         for r in rows
     ]
+
+    set_cached(key, result, ttl=300)
+
+    return result
 
 
 # ── 4. By year only (all regions + models combined) ──────────────────────────
@@ -134,6 +196,10 @@ def by_year(
     When a specific year is provided, returns that year's row.
     When no year is provided, returns a single aggregated row across all years.
     """
+    key = f"{CACHE_VERSION}:by-year:{year or 'all'}:{region or 'all'}:{model or 'all'}"
+
+    if cached := get_cached(key):
+        return cached
 
     # ── Specific year requested → return that year's row ──
     if year:
@@ -152,7 +218,8 @@ def by_year(
             q = q.filter(models.SalesFact.model == model)
 
         rows = q.order_by(models.SalesFact.year).all()
-        return [
+
+        result = [
             schemas.SummaryRow(
                 year           = r.year,
                 total_units    = r.total_units,
@@ -163,6 +230,10 @@ def by_year(
             )
             for r in rows
         ]
+
+        set_cached(key, result, ttl=300)
+
+        return result
 
     # ── No year filter → return one aggregated "All Years" row ──
     agg = db.query(
@@ -179,7 +250,8 @@ def by_year(
         agg = agg.filter(models.SalesFact.model == model)
 
     r = agg.one()
-    return [
+
+    result = [
         schemas.SummaryRow(
             year           = 0,  # sentinel value — 0 means "All Years"
             total_units    = r.total_units,
@@ -189,6 +261,10 @@ def by_year(
             avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
         )
     ]
+
+    set_cached(key, result, ttl=300)
+
+    return result
 
 
 # ── 5. Monthly trend ──────────────────────────────────────────────────────────
