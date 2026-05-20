@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Float
 
-from app import models, schemas
+from app import schemas
 from app.deps import get_db, get_current_user
+from app.services import sales_service
 
 router = APIRouter(prefix="/sales", tags=["Sales"])
 
@@ -19,33 +19,10 @@ def annual_summary(db: Session = Depends(get_db), _=AuthDep):
     Total units, total revenue, avg price, avg BEV share and avg GDP growth
     grouped by year — powers the KPI cards and the annual bar chart.
     """
-    rows = (
-        db.query(
-            models.SalesFact.year,
-            func.sum(models.SalesFact.units_sold)                        .label("total_units"),
-            func.sum(models.SalesFact.revenue_eur)                       .label("total_revenue"),
-            func.avg(cast(models.SalesFact.avg_price_eur, Float))        .label("avg_price_eur"),
-            func.avg(cast(models.SalesFact.bev_share, Float))            .label("avg_bev_share"),
-            func.avg(cast(models.SalesFact.gdp_growth, Float))           .label("avg_gdp_growth"),
-        )
-        .group_by(models.SalesFact.year)
-        .order_by(models.SalesFact.year)
-        .all()
-    )
-    return [
-        schemas.SummaryRow(
-            year           = r.year,
-            total_units    = r.total_units,
-            total_revenue  = float(r.total_revenue),
-            avg_price_eur  = round(float(r.avg_price_eur), 2),
-            avg_bev_share  = round(float(r.avg_bev_share), 4),
-            avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
-        )
-        for r in rows
-    ]
+    return sales_service.get_annual_summary(db)
 
 
-# ── 2. By region × year ────────────────────────────────────────────────────────
+# ── 2. By region × year ───────────────────────────────────────────────────────
 
 @router.get("/by-region", response_model=list[schemas.RegionRow])
 def by_region(
@@ -57,30 +34,7 @@ def by_region(
     Units, revenue, avg price, avg BEV share per region per year.
     Powers the regional comparison chart.
     """
-    q = db.query(
-        models.SalesFact.region,
-        models.SalesFact.year,
-        func.sum(models.SalesFact.units_sold)                     .label("total_units"),
-        func.sum(models.SalesFact.revenue_eur)                    .label("total_revenue"),
-        func.avg(cast(models.SalesFact.avg_price_eur, Float))     .label("avg_price_eur"),
-        func.avg(cast(models.SalesFact.bev_share, Float))         .label("avg_bev_share"),
-    ).group_by(models.SalesFact.region, models.SalesFact.year)
-
-    if year:
-        q = q.filter(models.SalesFact.year == year)
-
-    rows = q.order_by(models.SalesFact.year, models.SalesFact.region).all()
-    return [
-        schemas.RegionRow(
-            region        = r.region,
-            year          = r.year,
-            total_units   = r.total_units,
-            total_revenue = float(r.total_revenue),
-            avg_price_eur = round(float(r.avg_price_eur), 2),
-            avg_bev_share = round(float(r.avg_bev_share), 4),
-        )
-        for r in rows
-    ]
+    return sales_service.get_by_region(db, year=year)
 
 
 # ── 3. By model × year ────────────────────────────────────────────────────────
@@ -95,31 +49,10 @@ def by_model(
     Units, revenue, avg price per model per year.
     Powers the model performance table.
     """
-    q = db.query(
-        models.SalesFact.model,
-        models.SalesFact.year,
-        func.sum(models.SalesFact.units_sold)                     .label("total_units"),
-        func.sum(models.SalesFact.revenue_eur)                    .label("total_revenue"),
-        func.avg(cast(models.SalesFact.avg_price_eur, Float))     .label("avg_price_eur"),
-    ).group_by(models.SalesFact.model, models.SalesFact.year)
-
-    if year:
-        q = q.filter(models.SalesFact.year == year)
-
-    rows = q.order_by(models.SalesFact.year, models.SalesFact.model).all()
-    return [
-        schemas.ModelRow(
-            model         = r.model,
-            year          = r.year,
-            total_units   = r.total_units,
-            total_revenue = float(r.total_revenue),
-            avg_price_eur = round(float(r.avg_price_eur), 2),
-        )
-        for r in rows
-    ]
+    return sales_service.get_by_model(db, year=year)
 
 
-# ── 4. By year only (all regions + models combined) ──────────────────────────
+# ── 4. By year (aggregated, with optional filters) ────────────────────────────
 
 @router.get("/by-year", response_model=list[schemas.SummaryRow])
 def by_year(
@@ -134,61 +67,7 @@ def by_year(
     When a specific year is provided, returns that year's row.
     When no year is provided, returns a single aggregated row across all years.
     """
-
-    # ── Specific year requested → return that year's row ──
-    if year:
-        q = db.query(
-            models.SalesFact.year,
-            func.sum(models.SalesFact.units_sold)                  .label("total_units"),
-            func.sum(models.SalesFact.revenue_eur)                 .label("total_revenue"),
-            func.avg(cast(models.SalesFact.avg_price_eur, Float))  .label("avg_price_eur"),
-            func.avg(cast(models.SalesFact.bev_share, Float))      .label("avg_bev_share"),
-            func.avg(cast(models.SalesFact.gdp_growth, Float))     .label("avg_gdp_growth"),
-        ).group_by(models.SalesFact.year).filter(models.SalesFact.year == year)
-
-        if region:
-            q = q.filter(models.SalesFact.region == region)
-        if model:
-            q = q.filter(models.SalesFact.model == model)
-
-        rows = q.order_by(models.SalesFact.year).all()
-        return [
-            schemas.SummaryRow(
-                year           = r.year,
-                total_units    = r.total_units,
-                total_revenue  = float(r.total_revenue),
-                avg_price_eur  = round(float(r.avg_price_eur), 2),
-                avg_bev_share  = round(float(r.avg_bev_share), 4),
-                avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
-            )
-            for r in rows
-        ]
-
-    # ── No year filter → return one aggregated "All Years" row ──
-    agg = db.query(
-        func.sum(models.SalesFact.units_sold)                  .label("total_units"),
-        func.sum(models.SalesFact.revenue_eur)                 .label("total_revenue"),
-        func.avg(cast(models.SalesFact.avg_price_eur, Float))  .label("avg_price_eur"),
-        func.avg(cast(models.SalesFact.bev_share, Float))      .label("avg_bev_share"),
-        func.avg(cast(models.SalesFact.gdp_growth, Float))     .label("avg_gdp_growth"),
-    )
-
-    if region:
-        agg = agg.filter(models.SalesFact.region == region)
-    if model:
-        agg = agg.filter(models.SalesFact.model == model)
-
-    r = agg.one()
-    return [
-        schemas.SummaryRow(
-            year           = 0,  # sentinel value — 0 means "All Years"
-            total_units    = r.total_units,
-            total_revenue  = float(r.total_revenue),
-            avg_price_eur  = round(float(r.avg_price_eur), 2),
-            avg_bev_share  = round(float(r.avg_bev_share), 4),
-            avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
-        )
-    ]
+    return sales_service.get_by_year(db, year=year, region=region, model=model)
 
 
 # ── 5. Monthly trend ──────────────────────────────────────────────────────────
@@ -203,30 +82,7 @@ def monthly_trend(
     Global units and revenue per year+month.
     Powers the monthly line chart.
     """
-    q = db.query(
-        models.SalesFact.year,
-        models.SalesFact.month,
-        func.sum(models.SalesFact.units_sold)                      .label("total_units"),
-        func.sum(models.SalesFact.revenue_eur)                     .label("total_revenue"),
-        func.avg(cast(models.SalesFact.bev_share, Float))          .label("avg_bev_share"),
-        func.avg(cast(models.SalesFact.fuel_price_index, Float))   .label("avg_fuel_price"),
-    ).group_by(models.SalesFact.year, models.SalesFact.month)
-
-    if year:
-        q = q.filter(models.SalesFact.year == year)
-
-    rows = q.order_by(models.SalesFact.year, models.SalesFact.month).all()
-    return [
-        schemas.MonthlyTrendRow(
-            year           = r.year,
-            month          = r.month,
-            total_units    = r.total_units,
-            total_revenue  = float(r.total_revenue),
-            avg_bev_share  = round(float(r.avg_bev_share), 4),
-            avg_fuel_price = round(float(r.avg_fuel_price), 4),
-        )
-        for r in rows
-    ]
+    return sales_service.get_monthly_trend(db, year=year)
 
 
 # ── 6. BEV adoption trend ─────────────────────────────────────────────────────
@@ -237,62 +93,25 @@ def bev_trend(db: Session = Depends(get_db), _=AuthDep):
     Average BEV share per region per year.
     Powers the EV adoption line chart.
     """
-    rows = (
-        db.query(
-            models.SalesFact.region,
-            models.SalesFact.year,
-            func.avg(cast(models.SalesFact.bev_share, Float)).label("avg_bev_share"),
-        )
-        .group_by(models.SalesFact.region, models.SalesFact.year)
-        .order_by(models.SalesFact.region, models.SalesFact.year)
-        .all()
-    )
-    return [
-        schemas.BevTrendRow(
-            region        = r.region,
-            year          = r.year,
-            avg_bev_share = round(float(r.avg_bev_share), 4),
-        )
-        for r in rows
-    ]
+    return sales_service.get_bev_trend(db)
 
 
 # ── 7. Raw data (paginated) ───────────────────────────────────────────────────
 
 @router.get("/raw", response_model=schemas.PaginatedSales)
 def raw_sales(
-    page:   int         = Query(1,    ge=1,  description="Page number"),
-    size:   int         = Query(50,   ge=1, le=200, description="Rows per page"),
-    year:   int | None  = Query(None, description="Filter by year"),
-    region: str | None  = Query(None, description="Filter by region"),
-    model:  str | None  = Query(None, description="Filter by model"),
+    page:   int        = Query(1,    ge=1,         description="Page number"),
+    size:   int        = Query(50,   ge=1, le=200, description="Rows per page"),
+    year:   int | None = Query(None,               description="Filter by year"),
+    region: str | None = Query(None,               description="Filter by region"),
+    model:  str | None = Query(None,               description="Filter by model"),
     db: Session = Depends(get_db),
     _=AuthDep,
 ):
     """
     Paginated raw fact table — useful for a detailed data view page.
     """
-    q = db.query(models.SalesFact)
-
-    if year:
-        q = q.filter(models.SalesFact.year == year)
-    if region:
-        q = q.filter(models.SalesFact.region == region)
-    if model:
-        q = q.filter(models.SalesFact.model == model)
-
-    total = q.count()
-    rows  = q.order_by(
-        models.SalesFact.year,
-        models.SalesFact.month,
-        models.SalesFact.region,
-        models.SalesFact.model,
-    ).offset((page - 1) * size).limit(size).all()
-
-    return schemas.PaginatedSales(
-        total=total, page=page, size=size,
-        results=[schemas.RawSalesRow.model_validate(r) for r in rows],
-    )
+    return sales_service.get_raw_sales(db, page=page, size=size, year=year, region=region, model=model)
 
 
 # ── 8. Filter options ─────────────────────────────────────────────────────────
@@ -303,7 +122,4 @@ def filter_options(db: Session = Depends(get_db), _=AuthDep):
     Returns the distinct years, regions and models available.
     Frontend uses this to populate filter dropdowns.
     """
-    years      = [r[0] for r in db.query(models.SalesFact.year)  .distinct().order_by(models.SalesFact.year).all()]
-    regions    = [r[0] for r in db.query(models.SalesFact.region).distinct().order_by(models.SalesFact.region).all()]
-    model_list = [r[0] for r in db.query(models.SalesFact.model) .distinct().order_by(models.SalesFact.model).all()]
-    return {"years": years, "regions": regions, "models": model_list}
+    return sales_service.get_filter_options(db)
