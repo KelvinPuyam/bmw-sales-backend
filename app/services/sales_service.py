@@ -242,17 +242,22 @@ def get_by_year(
             if model:
                 agg = agg.filter(models.SalesFact.model == model)
 
+            # SQL SUM/AVG over zero rows returns NULL (None in Python).
+            # Since units_sold is NOT NULL, None here means the table is empty.
             r = agg.one()
-            result = [
-                schemas.SummaryRow(
-                    year           = 0,   # sentinel: 0 = "All Years"
-                    total_units    = r.total_units,
-                    total_revenue  = float(r.total_revenue),
-                    avg_price_eur  = round(float(r.avg_price_eur), 2),
-                    avg_bev_share  = round(float(r.avg_bev_share), 4),
-                    avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
-                )
-            ]
+            if r.total_units is None:
+                result = []
+            else:
+                result = [
+                    schemas.SummaryRow(
+                        year           = 0,   # sentinel: 0 = "All Years"
+                        total_units    = r.total_units,
+                        total_revenue  = float(r.total_revenue),
+                        avg_price_eur  = round(float(r.avg_price_eur), 2),
+                        avg_bev_share  = round(float(r.avg_bev_share), 4),
+                        avg_gdp_growth = round(float(r.avg_gdp_growth), 4),
+                    )
+                ]
     except Exception as exc:
         logger.exception("DB error in by_year (year=%s region=%s model=%s): %s", year, region, model, exc)
         raise

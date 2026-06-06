@@ -16,7 +16,7 @@ def get_all_users(db: Session) -> list[models.User]:
     """Return all users ordered by newest first. Admin only."""
     logger.info("Admin: fetching all users")
     try:
-        return db.query(models.User).order_by(models.User.created_at.desc()).all()
+        return db.query(models.User).order_by(models.User.created_at.desc(), models.User.id.desc()).all()
     except Exception as exc:
         logger.exception("Failed to fetch user list: %s", exc)
         raise
